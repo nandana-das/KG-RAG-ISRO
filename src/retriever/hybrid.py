@@ -12,21 +12,41 @@ if str(ROOT) not in sys.path:
 
 try:
     import spacy
-except ImportError:  # pragma: no cover
+except ImportError:
     spacy = None
 
 try:
     from src.retriever.faiss_retriever import get_passage_context
     from src.retriever.kg_retriever import get_kg_context
-except ImportError:  # pragma: no cover
+except ImportError:
     from retriever.faiss_retriever import get_passage_context
     from retriever.kg_retriever import get_kg_context
+
+# Load nlp once at module level to avoid reloading on every query
+_nlp = None
+
+def _get_nlp():
+    global _nlp
+    if _nlp is not None:
+        return _nlp
+    if spacy is None:
+        return None
+    try:
+        _nlp = spacy.load("en_core_web_lg")
+        from src.kg_builder.entity_ruler import add_entity_ruler
+        _nlp = add_entity_ruler(_nlp)
+    except OSError:
+        try:
+            _nlp = spacy.blank("en")
+        except Exception:
+            return None
+    return _nlp
 
 
 def _entity_fallback(query: str) -> list[str]:
     pattern = r"\b[A-Z][A-Za-z0-9-]+(?:\s+[A-Z][A-Za-z0-9-]+)*\b|\b[A-Z]{2,}\b"
     candidates = re.findall(pattern, query)
-    return [candidate.strip() for candidate in candidates if candidate.strip()][:10]
+    return [c.strip() for c in candidates if c.strip()][:10]
 
 
 def _query_keywords(query: str) -> list[str]:
@@ -37,19 +57,12 @@ def _extract_entities(query: str) -> list[str]:
     if not query:
         return []
 
-    if spacy is None:
+    nlp = _get_nlp()
+    if nlp is None:
         return _entity_fallback(query)
 
-    try:
-        nlp = spacy.load("en_core_web_sm")
-    except OSError:
-        try:
-            nlp = spacy.blank("en")
-        except Exception:
-            return _entity_fallback(query)
-
     doc = nlp(query)
-    entities = [ent.text.strip() for ent in getattr(doc, "ents", []) if ent.text.strip()]
+    entities = [ent.text.strip() for ent in doc.ents if ent.text.strip()]
     if entities:
         return entities[:10]
     return _entity_fallback(query)
@@ -84,4 +97,3 @@ def retrieve(query: str, passage_limit: int = 5, max_tokens: int = 4000) -> str:
 
 if __name__ == "__main__":
     print(retrieve("What is ISRO?"))
-

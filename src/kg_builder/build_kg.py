@@ -1,114 +1,210 @@
-"""Build a minimal knowledge graph from entity mentions in text."""
+"""Build a domain-specific knowledge graph from preprocessed ISRO chunks."""
 
 from __future__ import annotations
 
 import json
-import re
+import logging
+import pickle
+from collections import defaultdict
 from pathlib import Path
 
 import networkx as nx
+import spacy
+from spacy.tokens import Doc
 
-from src.kg_builder.ner import extract_entities
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger(__name__)
 
-
-def _normalize_text(value: str) -> str:
-    return re.sub(r"\s+", " ", value).strip()
-
-
-def _infer_relation(text: str, source: str, target: str) -> str:
-    text_lower = text.lower()
-    source_lower = source.lower()
-    target_lower = target.lower()
-
-    if "launched by" in text_lower and source_lower.startswith("chandrayaan") and "isro" in target_lower:
-        return "launched_by"
-    if "launched by" in text_lower and "isro" in source_lower and source_lower.startswith("isro"):
-        return "launched_by"
-    if "mission" in text_lower and ("isro" in source_lower or "isro" in target_lower):
-        return "mission_of"
-    return "related_to"
+ROOT = Path(__file__).resolve().parents[2]
+CHUNKS_PATH = ROOT / "data" / "chunks" / "chunks.json"
+KG_PATH = ROOT / "data" / "kg" / "knowledge_graph.json"
+KG_PKL_PATH = ROOT / "data" / "kg" / "knowledge_graph.pkl"
 
 
-def build_graph_from_text(text: str) -> nx.DiGraph:
-    """Create a directed NetworkX graph whose nodes are entities and edges encode direct relations."""
-    graph = nx.DiGraph()
-    entities = extract_entities(text)
-    if not entities:
-        return graph
+def load_nlp():
+    """Load spaCy pipeline with ISRO entity ruler."""
+    nlp = spacy.load("en_core_web_lg")
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from src.kg_builder.entity_ruler import add_entity_ruler
+    nlp = add_entity_ruler(nlp)
+    logger.info("spaCy pipeline loaded with ISRO entity ruler (%d patterns)", 
+                len(nlp.get_pipe("entity_ruler").patterns))
+    return nlp
 
-    entities = sorted(entities, key=lambda item: item["start"])
-    for entity in entities:
-        name = _normalize_text(entity["text"])
-        if not name:
+
+def load_chunks() -> list[dict]:
+    """Load preprocessed chunks from JSON."""
+    if not CHUNKS_PATH.exists():
+        raise FileNotFoundError(f"Chunks file not found: {CHUNKS_PATH}")
+    payload = json.loads(CHUNKS_PATH.read_text(encoding="utf-8"))
+    if isinstance(payload, list):
+        return payload
+    return payload.get("chunks", [])
+
+
+def extract_entities(doc: Doc) -> list[tuple[str, str]]:
+    """Extract named entities from a spaCy Doc."""
+    entities = []
+    for ent in doc.ents:
+        label = ent.label_
+        text = ent.text.strip()
+        if len(text) > 2 and text.isascii() and label in {
+            "MISSION", "LAUNCH_VEHICLE", "PAYLOAD", "PERSON",
+            "ORG", "LOC", "TECH", "GPE", "NORP", "DATE", "TIME",
+            "EVENT", "PRODUCT", "FAC", "WORK_OF_ART"
+        }:
+            entities.append((text, label))
+    return entities
+
+
+def extract_triples(doc: Doc, entities: list[tuple[str, str]]) -> list[tuple[str, str, str]]:
+    """
+    Extract (subject, relation, object) triples using dependency parsing.
+    Only considers entity pairs within 2-hop dependency distance.
+    """
+    triples = []
+    entity_tokens = {}
+
+    # Map entity text to their token spans
+    for ent in doc.ents:
+        entity_tokens[ent.text.strip()] = ent.root
+
+    entity_texts = [e[0] for e in entities]
+
+    for sent in doc.sents:
+        sent_entities = [e for e in entity_texts if e in sent.text]
+        if len(sent_entities) < 2:
             continue
-        graph.add_node(name, label=entity["label"])
 
-    for i in range(len(entities) - 1):
-        left = _normalize_text(entities[i]["text"])
-        right = _normalize_text(entities[i + 1]["text"])
-        if left and right and left != right:
-            relation = _infer_relation(text, left, right)
-            graph.add_edge(left, right, relation=relation)
+        for i, subj_text in enumerate(sent_entities):
+            for obj_text in sent_entities[i + 1:]:
+                if subj_text == obj_text:
+                    continue
 
-    if len(graph.nodes) >= 2 and graph.number_of_edges() == 0:
-        first = list(graph.nodes)[0]
-        second = list(graph.nodes)[1]
-        graph.add_edge(first, second, relation="related_to")
+                subj_root = entity_tokens.get(subj_text)
+                obj_root = entity_tokens.get(obj_text)
 
-    return graph
+                if subj_root is None or obj_root is None:
+                    continue
+
+                # Find governing verb or head connecting the two entities
+                relation = None
+
+                # Check if they share a common head within 2 hops
+                subj_ancestors = {subj_root.head, subj_root.head.head}
+                obj_ancestors = {obj_root.head, obj_root.head.head}
+                common = subj_ancestors & obj_ancestors
+
+                if common:
+                    head = next(iter(common))
+                    if head.pos_ in {"VERB", "AUX"}:
+                        relation = head.lemma_.lower()
+                    else:
+                        relation = f"{subj_root.dep_}_{obj_root.dep_}"
+                else:
+                    # Direct dependency check
+                    if subj_root.head == obj_root or obj_root.head == subj_root:
+                        relation = subj_root.dep_.lower()
+
+                if relation:
+                    triples.append((subj_text, relation, obj_text))
+
+    return triples
 
 
-def build_graph_from_file(input_path: str | Path, output_path: str | Path | None = None) -> nx.DiGraph:
-    """Load a text file, build a graph, and optionally save it as JSON."""
-    text = Path(input_path).read_text(encoding="utf-8")
-    graph = build_graph_from_text(text)
+def build_graph(chunks: list[dict], nlp) -> nx.MultiDiGraph:
+    """Build a NetworkX knowledge graph from all chunks."""
+    G = nx.MultiDiGraph()
+    total_triples = 0
+    batch_size = 50
 
-    if output_path is not None:
-        payload = {
-            "nodes": [{"id": node, "label": data.get("label", "UNKNOWN")} for node, data in graph.nodes(data=True)],
-            "edges": [{"source": source, "target": target, "relation": data.get("relation", "related_to")}
-                      for source, target, data in graph.edges(data=True)],
-        }
-        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-        Path(output_path).write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    texts = []
+    metas = []
+    for chunk in chunks:
+        if isinstance(chunk, dict):
+            text = chunk.get("text") or chunk.get("content") or ""
+            source = chunk.get("source_url", "")
+        else:
+            text = str(chunk)
+            source = ""
+        if text.strip():
+            texts.append(text.strip())
+            metas.append(source)
 
-    return graph
+    logger.info("Processing %d chunks in batches of %d...", len(texts), batch_size)
+
+    for i in range(0, len(texts), batch_size):
+        batch_texts = texts[i:i + batch_size]
+        batch_metas = metas[i:i + batch_size]
+
+        for doc, source in zip(nlp.pipe(batch_texts, batch_size=batch_size), batch_metas):
+            entities = extract_entities(doc)
+            triples = extract_triples(doc, entities)
+
+            for subj, rel, obj in triples:
+                if not G.has_node(subj):
+                    G.add_node(subj)
+                if not G.has_node(obj):
+                    G.add_node(obj)
+                G.add_edge(subj, obj, relation=rel, source=source)
+                total_triples += 1
+
+        if (i // batch_size + 1) % 10 == 0:
+            logger.info("  Processed %d/%d chunks, %d triples so far",
+                        min(i + batch_size, len(texts)), len(texts), total_triples)
+
+    logger.info("Graph built: %d nodes, %d edges", G.number_of_nodes(), G.number_of_edges())
+    return G
 
 
-def build_graph_from_directory(input_dir: str | Path, output_dir: str | Path | None = None) -> nx.DiGraph:
-    """Aggregate graph construction across all markdown files in a directory and write the combined JSON graph."""
-    source_dir = Path(input_dir)
-    if not source_dir.exists():
-        raise FileNotFoundError(f"Input directory does not exist: {source_dir}")
+def save_graph(G: nx.MultiDiGraph):
+    """Save graph as both JSON and pickle."""
+    KG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-    aggregate = nx.DiGraph()
-    for file_path in sorted(source_dir.glob("*.md")):
-        text = file_path.read_text(encoding="utf-8")
-        graph = build_graph_from_text(text)
-        for node, data in graph.nodes(data=True):
-            if node not in aggregate:
-                aggregate.add_node(node, label=data.get("label", "UNKNOWN"))
-            else:
-                aggregate.nodes[node]["label"] = aggregate.nodes[node].get("label", "UNKNOWN")
-        for source, target, data in graph.edges(data=True):
-            aggregate.add_edge(source, target, relation=data.get("relation", "related_to"))
+    # Save as pickle (fast, preserves full graph)
+    with open(KG_PKL_PATH, "wb") as f:
+        pickle.dump(G, f)
+    logger.info("Graph saved to %s", KG_PKL_PATH)
 
-    if output_dir is not None:
-        output_path = Path(output_dir)
-        output_path.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "nodes": [{"id": node, "label": data.get("label", "UNKNOWN")} for node, data in aggregate.nodes(data=True)],
-            "edges": [{"source": source, "target": target, "relation": data.get("relation", "related_to")}
-                      for source, target, data in aggregate.edges(data=True)],
-        }
-        graph_file = output_path / "knowledge_graph.json"
-        graph_file.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    # Save as JSON (human-readable, for inspection)
+    graph_data = {
+        "nodes": list(G.nodes()),
+        "edges": [
+            {
+                "source": u,
+                "target": v,
+                "relation": d.get("relation", "related_to"),
+                "doc_source": d.get("source", "")
+            }
+            for u, v, d in G.edges(data=True)
+        ]
+    }
+    KG_PATH.write_text(json.dumps(graph_data, indent=2, ensure_ascii=False), encoding="utf-8")
+    logger.info("Graph JSON saved to %s", KG_PATH)
 
-    return aggregate
+
+def main():
+    logger.info("Loading chunks from %s", CHUNKS_PATH)
+    chunks = load_chunks()
+    logger.info("Loaded %d chunks", len(chunks))
+
+    logger.info("Loading spaCy pipeline...")
+    nlp = load_nlp()
+
+    logger.info("Building knowledge graph...")
+    G = build_graph(chunks, nlp)
+
+    logger.info("Saving graph...")
+    save_graph(G)
+
+    logger.info("Done. Nodes: %d, Edges: %d", G.number_of_nodes(), G.number_of_edges())
+    logger.info("Top 10 most connected nodes:")
+    top_nodes = sorted(G.degree(), key=lambda x: x[1], reverse=True)[:10]
+    for node, degree in top_nodes:
+        logger.info("  %s: degree %d", node, degree)
 
 
 if __name__ == "__main__":
-    sample = "Chandrayaan-3 was launched by ISRO from Sriharikota."
-    graph = build_graph_from_text(sample)
-    print(graph.edges(data=True))
-
+    main()
