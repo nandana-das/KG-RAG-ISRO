@@ -2,28 +2,28 @@
   {
     "system": "kgrag",
     "n_evaluated": 200,
-    "idk_count": 18,
-    "idk_rate": 0.09,
-    "rouge_l": 0.2678,
-    "answer_coverage": 0.3896,
+    "idk_count": 19,
+    "idk_rate": 0.095,
+    "rouge_l": 0.2706,
+    "answer_coverage": 0.3977,
     "exact_match": 0.02
   },
   {
     "system": "bm25",
     "n_evaluated": 200,
-    "idk_count": 5,
-    "idk_rate": 0.025,
-    "rouge_l": 0.2967,
-    "answer_coverage": 0.4278,
+    "idk_count": 6,
+    "idk_rate": 0.03,
+    "rouge_l": 0.2949,
+    "answer_coverage": 0.4379,
     "exact_match": 0.03
   },
   {
     "system": "vanilla_rag",
     "n_evaluated": 200,
-    "idk_count": 8,
-    "idk_rate": 0.04,
-    "rouge_l": 0.2416,
-    "answer_coverage": 0.3746,
-    "exact_match": 0.015
+    "idk_count": 26,
+    "idk_rate": 0.13,
+    "rouge_l": 0.269,
+    "answer_coverage": 0.3985,
+    "exact_match": 0.02
   }
 ]
