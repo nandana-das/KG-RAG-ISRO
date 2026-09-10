@@ -1,111 +1,243 @@
-"""Retrieve one-hop knowledge-graph context for entity mentions."""
+"""Knowledge-graph context retrieval with two-hop neighbourhood expansion."""
 
 from __future__ import annotations
 
 import json
+import pickle
 from pathlib import Path
 
-GRAPH_PATH = Path(__file__).resolve().parents[2] / "data" / "kg" / "knowledge_graph.json"
+from matplotlib import text
+import networkx as nx
+
+ROOT = Path(__file__).resolve().parents[2]
+KG_PKL_PATH = ROOT / "data" / "kg" / "knowledge_graph.pkl"
+KG_JSON_PATH = ROOT / "data" / "kg" / "knowledge_graph.json"
+
+_graph: nx.MultiDiGraph | None = None
 
 
-def _normalize_entity(value: str) -> str:
-    return " ".join(str(value).strip().split()).lower()
+def _load_graph() -> nx.MultiDiGraph:
+    global _graph
+    if _graph is not None:
+        return _graph
+
+    if KG_PKL_PATH.exists():
+        with open(KG_PKL_PATH, "rb") as f:
+            _graph = pickle.load(f)
+    elif KG_JSON_PATH.exists():
+        data = json.loads(KG_JSON_PATH.read_text(encoding="utf-8"))
+        _graph = nx.MultiDiGraph()
+        for node in data.get("nodes", []):
+            _graph.add_node(node)
+        for edge in data.get("edges", []):
+            _graph.add_edge(
+                edge["source"],
+                edge["target"],
+                relation=edge.get("relation", "related_to"),
+                source=edge.get("doc_source", ""),
+            )
+    else:
+        _graph = nx.MultiDiGraph()
+
+    return _graph
 
 
-def _relation_text(relation: str) -> str:
-    if not relation:
-        return "is related to"
-    relation = str(relation).replace("_", " ").strip()
-    if relation in {"related to", "related_to"}:
-        return "is related to"
-    if relation == "launched_by":
-        return "was launched by"
-    if relation == "mission_of":
-        return "is part of the mission of"
-    return relation
+def _get_one_hop(G: nx.MultiDiGraph, entity: str) -> list[tuple[str, str, str]]:
+    """Get all direct (one-hop) neighbours of an entity."""
+    triples = []
+    if entity not in G:
+        return triples
+    for _, neighbor, data in G.out_edges(entity, data=True):
+        relation = data.get("relation", "related_to")
+        triples.append((entity, relation, neighbor))
+    for predecessor, _, data in G.in_edges(entity, data=True):
+        relation = data.get("relation", "related_to")
+        triples.append((predecessor, relation, entity))
+    return triples
 
 
-def _load_graph() -> dict:
-    if not GRAPH_PATH.exists():
-        return {"nodes": [], "edges": []}
+def _get_two_hop(G: nx.MultiDiGraph, entity: str, max_triples: int = 50) -> list[tuple[str, str, str]]:
+    """
+    Get one-hop and two-hop neighbours of an entity.
+    Two-hop: entity -> neighbour -> neighbour_of_neighbour
+    Limited to max_triples to avoid context explosion.
+    """
+    triples = []
 
-    payload = json.loads(GRAPH_PATH.read_text(encoding="utf-8"))
-    if isinstance(payload, dict):
-        nodes = payload.get("nodes", []) if isinstance(payload.get("nodes", []), list) else []
-        edges = payload.get("edges", []) if isinstance(payload.get("edges", []), list) else []
-        return {"nodes": nodes, "edges": edges}
-    if isinstance(payload, list):
-        return {"nodes": [], "edges": payload}
-    return {"nodes": [], "edges": []}
+    if entity not in G:
+        return triples
+
+    # One-hop neighbours
+    one_hop_nodes = set()
+    for _, neighbor, data in G.out_edges(entity, data=True):
+        relation = data.get("relation", "related_to")
+        triples.append((entity, relation, neighbor))
+        one_hop_nodes.add(neighbor)
+    for predecessor, _, data in G.in_edges(entity, data=True):
+        relation = data.get("relation", "related_to")
+        triples.append((predecessor, relation, entity))
+        one_hop_nodes.add(predecessor)
+
+    # Two-hop neighbours
+    two_hop_triples = []
+    for hop1_node in one_hop_nodes:
+        for _, hop2_node, data in G.out_edges(hop1_node, data=True):
+            if hop2_node == entity:
+                continue
+            relation = data.get("relation", "related_to")
+            two_hop_triples.append((hop1_node, relation, hop2_node))
+        for hop0_node, _, data in G.in_edges(hop1_node, data=True):
+            if hop0_node == entity:
+                continue
+            relation = data.get("relation", "related_to")
+            two_hop_triples.append((hop0_node, relation, hop1_node))
+
+    remaining = max_triples - len(triples)
+    triples.extend(two_hop_triples[:max(0, remaining)])
+
+    return triples
 
 
-def get_kg_context(entities: list[str]) -> str:
-    """Return natural-language one-hop triples for the supplied entities."""
+NOISE_RELATIONS = {
+    'compound', 'pobj', 'npadvmod', 'appos', 'nmod',
+    'amod', 'det', 'punct', 'prep', 'cc', 'conj',
+    'nsubj', 'dobj', 'attr', 'advmod', 'aux', 'mark',
+    'ROOT', 'poss', 'relcl', 'acl', 'nummod', 'quantmod',
+    'dep', 'parataxis', 'intj', 'expl', 'csubj', 'ccomp',
+    'xcomp', 'advcl', 'pcomp', 'agent', 'neg', 'cop',
+    'predet', 'preconj', 'possessive', 'case', 'nsubjpass',
+    'auxpass', 'oprd', 'meta', 'dative', 'prt'
+}
+
+# Keep only clean verb-like relations
+GOOD_RELATIONS = {
+    'launch', 'carry', 'orbit', 'land', 'discover', 'develop',
+    'build', 'design', 'operate', 'study', 'detect', 'image',
+    'support', 'provide', 'use', 'include', 'contain', 'perform',
+    'achieve', 'complete', 'conduct', 'establish', 'found', 'name',
+    'lead', 'manage', 'head', 'direct', 'succeed', 'fail', 'crash',
+    'insert', 'deploy', 'separate', 'communicate', 'track', 'monitor',
+    'produce', 'generate', 'transmit', 'receive', 'measure', 'observe',
+    'map', 'survey', 'explore', 'test', 'demonstrate', 'validate',
+    'make', 'unveil', 'continue', 'be', 'have', 'carry_out',
+    'relate', 'connect', 'link', 'associate', 'collaborate',
+}
+
+
+def _is_noise(text: str) -> bool:
+    """Filter out pure dates, numbers, single chars, and garbage tokens."""
+    text = text.strip()
+    if len(text) < 3:
+        return True
+    alpha_count = sum(1 for c in text if c.isalpha())
+    if alpha_count < 3:
+        return True
+    # Skip things that are mostly punctuation
+    if text.startswith('(') or text.startswith('['):
+        return True
+
+    # Skip date fragments
+    if any(month in text.lower() for month in ['jan', 'feb', 'mar', 'apr', 'may', 'jun',
+                                             'jul', 'aug', 'sep', 'oct', 'nov', 'dec']):
+        if any(c.isdigit() for c in text):
+          return True
+    return False
+
+
+def _serialize_triples(triples: list[tuple[str, str, str]]) -> str:
+    """Convert triples to natural language sentences, filtering noise."""
+    if not triples:
+        return ""
+    lines = []
+    seen = set()
+    for subj, rel, obj in triples:
+        # Skip noisy dependency relations
+        rel_lower = rel.lower()
+        if any(noise in rel_lower for noise in NOISE_RELATIONS):
+            continue
+        # Skip noisy subjects or objects
+        if _is_noise(subj) or _is_noise(obj):
+            continue
+        # Skip date-like relations
+        if any(c.isdigit() for c in rel):
+            continue
+        # Skip subjects/objects with brackets
+        if '(' in obj or '[' in obj:
+            continue
+        # Skip subjects that are phrases with common words
+        skip_words = {'a ', 'an ', 'the ', 'live ', 'webinar', 'streaming'}
+        if any(subj.lower().startswith(w) for w in skip_words):
+            continue
+                # Skip objects starting with articles/determiners
+        obj_skip = {'a ', 'an ', 'the ', 'live ', 'webinar', 'streaming', 'of '}
+        if any(obj.lower().startswith(w) for w in obj_skip):
+            continue
+        # Skip objects ending with month names
+        months = ['jan', 'feb', 'mar', 'apr', 'may', 'jun',
+                  'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
+        if any(obj.lower().endswith(m) for m in months):
+            continue
+        # Skip vague relations
+        if rel.lower() in {'be', 'have'}:
+            continue
+        
+        # Skip very long objects (likely garbled context)
+        if len(obj) > 80 or len(subj) > 80:
+            continue
+        rel_text = rel.replace("_", " ").lower()
+        line = f"{subj} {rel_text} {obj}."
+        if line not in seen:
+            lines.append(line)
+            seen.add(line)
+    return "\n".join(lines)
+
+
+def get_kg_context(entities: list[str], two_hop: bool = True, max_triples_per_entity: int = 50) -> str:
+    """
+    Retrieve KG context for a list of entities.
+    Uses two-hop expansion by default for richer relational context.
+    """
     if not entities:
         return ""
 
-    graph = _load_graph()
-    edges = graph.get("edges", [])
-    if not edges:
+    G = _load_graph()
+    if G.number_of_nodes() == 0:
         return ""
 
-    entity_names = {str(entity).strip() for entity in entities if str(entity).strip()}
-    if not entity_names:
-        return ""
+    all_triples = []
+    seen_triples = set()
 
-    normalized_lookup = { _normalize_entity(item.get("id", "")): item.get("id", "") for item in graph.get("nodes", []) if isinstance(item, dict) and item.get("id") }
-    triples: list[str] = []
-    seen: set[tuple[str, str, str]] = set()
+    for entity in entities:
+        if two_hop:
+            triples = _get_two_hop(G, entity, max_triples=max_triples_per_entity)
+        else:
+            triples = _get_one_hop(G, entity)
 
-    for edge in edges:
-        if not isinstance(edge, dict):
-            continue
-        source = edge.get("source", "")
-        target = edge.get("target", "")
-        relation = edge.get("relation", "related_to")
-        if not source or not target:
-            continue
+        for triple in triples:
+            key = (triple[0], triple[1], triple[2])
+            if key not in seen_triples:
+                all_triples.append(triple)
+                seen_triples.add(key)
 
-        source_norm = _normalize_entity(source)
-        target_norm = _normalize_entity(target)
-        if source_norm in {_normalize_entity(e) for e in entity_names} or target_norm in {_normalize_entity(e) for e in entity_names}:
-            match_source = source_norm in {_normalize_entity(e) for e in entity_names}
-            match_target = target_norm in {_normalize_entity(e) for e in entity_names}
-            if not (match_source or match_target):
-                continue
+    if not all_triples:
+        # Fuzzy fallback
+        entity_lower = {e.lower() for e in entities}
+        for node in G.nodes():
+            if any(e in node.lower() or node.lower() in e for e in entity_lower):
+                if two_hop:
+                    triples = _get_two_hop(G, node, max_triples=20)
+                else:
+                    triples = _get_one_hop(G, node)
+                for triple in triples:
+                    key = (triple[0], triple[1], triple[2])
+                    if key not in seen_triples:
+                        all_triples.append(triple)
+                        seen_triples.add(key)
+                if all_triples:
+                    break
 
-            source_label = normalized_lookup.get(source_norm, source)
-            target_label = normalized_lookup.get(target_norm, target)
-            triple = f"{source_label} {_relation_text(relation)} {target_label}"
-            key = (source_label.lower(), relation.lower(), target_label.lower())
-            if key not in seen:
-                seen.add(key)
-                triples.append(triple)
-
-    # Support reverse-direction lookup for entity lists in the target position too.
-    for edge in edges:
-        if not isinstance(edge, dict):
-            continue
-        source = edge.get("source", "")
-        target = edge.get("target", "")
-        relation = edge.get("relation", "related_to")
-        if not source or not target:
-            continue
-
-        source_norm = _normalize_entity(source)
-        target_norm = _normalize_entity(target)
-        if any(_normalize_entity(entity) == source_norm for entity in entity_names) or any(_normalize_entity(entity) == target_norm for entity in entity_names):
-            source_label = normalized_lookup.get(source_norm, source)
-            target_label = normalized_lookup.get(target_norm, target)
-            triple = f"{source_label} {_relation_text(relation)} {target_label}"
-            key = (source_label.lower(), relation.lower(), target_label.lower())
-            if key not in seen:
-                seen.add(key)
-                triples.append(triple)
-
-    return "\n".join(triples[:20]).strip()
+    return _serialize_triples(all_triples)
 
 
 if __name__ == "__main__":
-    print(get_kg_context(["ISRO", "Chandrayaan-3"]))
-
+    print(get_kg_context(["Chandrayaan-2", "PSLV"]))
