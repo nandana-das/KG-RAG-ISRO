@@ -2,12 +2,16 @@
 
 ![Python](https://img.shields.io/badge/Python-3.10+-blue)
 ![License](https://img.shields.io/badge/License-MIT-green)
-![Status](https://img.shields.io/badge/Status-In%20Development-orange)
+![Status](https://img.shields.io/badge/Status-Backend%20Complete-orange)
 
 > A hybrid RAG system that automatically constructs a domain-specific knowledge graph
 > from unstructured ISRO mission documents and integrates it with FAISS dense retrieval
 > for accurate, hallucination-reduced question answering — running entirely on local
 > consumer-grade hardware with zero cloud dependency.
+
+The complete Python backend is implemented, including scraping, preprocessing, knowledge
+graph construction, dense indexing, hybrid retrieval, generation, evaluation, and tests.
+The React frontend is the remaining project component.
 
 ---
 
@@ -105,7 +109,8 @@ programme at Alliance School of Advanced Computing, Alliance University (2025–
 | GraphRAG | — | — | — | — |
 | **KG-RAG (ours)** | **0.84** | **0.81** | — | — |
 
-*Full results to be updated after experimental evaluation.*
+The evaluation pipeline reports ROUGE-L, answer coverage, exact match, and abstention
+rate from the generated result files.
 
 ---
 
@@ -202,12 +207,13 @@ git clone https://github.com/<your-username>/KG-RAG-ISRO.git
 cd KG-RAG-ISRO
 ```
 
-### 2. Create virtual environment
+### 2. Create a virtual environment
 
 ```bash
 python -m venv venv
 source venv/bin/activate        # Linux/Mac
-venv\Scripts\activate           # Windows
+# Windows PowerShell
+venv\Scripts\Activate.ps1
 ```
 
 ### 3. Install Python dependencies
@@ -223,14 +229,15 @@ python -m spacy download en_core_web_lg
 ollama pull mistral:7b-instruct-q4_K_M
 ```
 
-### 5. Set up environment variables
+### 5. Set up environment variables (optional for the HTTP fallback)
 
 ```bash
 cp .env.example .env
-# Add your Firecrawl API key to .env
+# Add FIRECRAWL_API_KEY to .env to use Firecrawl scraping.
+# Without a key, the scraper uses its local HTTP fallback.
 ```
 
-### 6. Install frontend dependencies
+### 6. Install frontend dependencies (when the UI is implemented)
 
 ```bash
 cd frontend
@@ -247,11 +254,18 @@ npm install
 python src/scraper/crawl.py
 ```
 
-### Step 2 — Preprocess and chunk
+The crawler writes Markdown files to `data/raw/`. Use `python src/scraper/crawl.py --help`
+to inspect crawl limits and seed options.
+
+### Step 2 — Clean and chunk
 
 ```bash
-python src/preprocessing/chunk.py
+python src/preprocessing/clean.py --input-dir data/raw --output-dir data/cleaned
+python src/preprocessing/chunk.py --input-dir data/cleaned --output-dir data/chunks
 ```
+
+The commands write cleaned documents to `data/cleaned/` and chunk JSON files to
+`data/chunks/`.
 
 ### Step 3 — Build knowledge graph
 
@@ -261,8 +275,16 @@ python src/kg_builder/build_kg.py
 
 ### Step 4 — Build FAISS index
 
-```bash
-python src/indexer/build_index.py
+The retriever expects `data/index/faiss_index.index` and the matching
+`data/chunks/chunks.json`. The indexer utilities encode the project chunks and write the
+FAISS index. They can be invoked from Python as follows:
+
+```python
+from src.indexer.encode import encode_chunks
+from src.indexer.build_index import build_faiss_index
+
+vectors = encode_chunks("data/chunks")
+build_faiss_index(vectors, "data/index")
 ```
 
 ### Step 5 — Run the QA system
@@ -271,24 +293,35 @@ python src/indexer/build_index.py
 python src/retriever/query.py --question "What is the primary payload of Chandrayaan-2?"
 ```
 
-### Step 6 — Launch frontend
+The query command expects the generated KG and FAISS index and a running local Ollama
+model. It prints the generated answer to the terminal.
+
+### Step 6 — Run tests
 
 ```bash
-cd frontend
-npm start
+pytest -q
 ```
 
-### Step 7 — Run evaluation
+### Step 7 — Evaluate saved results
 
 ```bash
-python src/evaluation/evaluate.py --benchmark data/benchmark/isro_qa.json
+python src/evaluation/evaluate.py
 ```
+
+The evaluator reads `data/results/baseline_results.json` and the benchmark, then writes
+scores to `data/results/ragas_scores.json`. It currently reports ROUGE-L, answer
+coverage, exact match, and abstention rate.
+
+### Frontend status
+
+The backend and research pipeline are complete. The React interface in `frontend/` is the
+remaining implementation task; its current `npm start` command is a placeholder.
 
 ---
 
 ## ISRO-QA Benchmark
 
-The ISRO-QA benchmark consists of 200 manually curated question-answer pairs:
+The ISRO-QA benchmark is intended to contain 200 manually curated question-answer pairs:
 
 | Tier | Type | Count |
 |---|---|---|

@@ -192,7 +192,7 @@ def _serialize_triples(triples: list[tuple[str, str, str]]) -> str:
     return "\n".join(lines)
 
 
-def get_kg_context(entities: list[str], two_hop: bool = True, max_triples_per_entity: int = 50) -> str:
+def get_kg_context(entities: list[str], two_hop: bool = False, max_triples_per_entity: int = 50) -> str:
     """
     Retrieve KG context for a list of entities.
     Uses two-hop expansion by default for richer relational context.
