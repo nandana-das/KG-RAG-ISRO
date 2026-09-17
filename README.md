@@ -2,16 +2,18 @@
 
 ![Python](https://img.shields.io/badge/Python-3.10+-blue)
 ![License](https://img.shields.io/badge/License-MIT-green)
-![Status](https://img.shields.io/badge/Status-Backend%20Complete-orange)
+![Backend](https://img.shields.io/badge/Backend-Complete-brightgreen)
+![Frontend](https://img.shields.io/badge/Frontend-Pending-orange)
 
 > A hybrid RAG system that automatically constructs a domain-specific knowledge graph
 > from unstructured ISRO mission documents and integrates it with FAISS dense retrieval
 > for accurate, hallucination-reduced question answering — running entirely on local
 > consumer-grade hardware with zero cloud dependency.
 
-The complete Python backend is implemented, including scraping, preprocessing, knowledge
-graph construction, dense indexing, hybrid retrieval, generation, evaluation, and tests.
-The React frontend is the remaining project component.
+The complete Python backend is implemented and has produced evaluated results, including
+scraping, preprocessing, knowledge graph construction, dense indexing, hybrid retrieval,
+generation, evaluation, ablation studies, and unit tests. The React frontend and analysis
+notebooks are the remaining implementation tasks.
 
 ---
 
@@ -121,22 +123,26 @@ KG-RAG-ISRO/
 │
 ├── data/
 │   ├── raw/                    # Scraped markdown files from isro.gov.in
-│   ├── chunks/                 # Preprocessed chunks (JSON)
-│   ├── kg/                     # NetworkX graph files
-│   └── benchmark/              # ISRO-QA benchmark (JSON)
+│   ├── cleaned/                # Cleaned documents (output of clean.py)
+│   ├── chunks/                 # Preprocessed chunks — chunks.json
+│   ├── index/                  # FAISS index files
+│   ├── kg/                     # NetworkX graph (pickle + JSON)
+│   ├── results/                # Evaluation outputs (ragas_scores.json, etc.)
+│   └── benchmark/              # ISRO-QA benchmark — isro_qa.json
 │
 ├── src/
 │   ├── scraper/
-│   │   └── crawl.py            # Firecrawl data collection
+│   │   └── crawl.py            # Firecrawl + HTTP-fallback data collection
 │   │
 │   ├── preprocessing/
 │   │   ├── clean.py            # Noise removal, deduplication
-│   │   └── chunk.py            # 512-token chunker with stride
+│   │   └── chunk.py            # 512-token chunker with 128-token stride
 │   │
 │   ├── kg_builder/
 │   │   ├── ner.py              # spaCy NER entity extraction
-│   │   ├── relations.py        # Dependency-based triple extraction
-│   │   └── build_kg.py         # NetworkX graph construction
+│   │   ├── entity_ruler.py     # ISRO-domain EntityRuler patterns
+│   │   ├── relations.py        # Stub — triple logic lives in build_kg.py
+│   │   └── build_kg.py         # NetworkX graph construction + dep. parsing
 │   │
 │   ├── indexer/
 │   │   ├── encode.py           # MiniLM-L6-v2 chunk encoding
@@ -146,7 +152,7 @@ KG-RAG-ISRO/
 │   │   ├── kg_retriever.py     # One-hop KG neighbourhood expansion
 │   │   ├── faiss_retriever.py  # Dense passage retrieval
 │   │   ├── hybrid.py           # Context merging pipeline
-│   │   └── query.py            # Main query entrypoint
+│   │   └── query.py            # CLI query entrypoint
 │   │
 │   ├── generator/
 │   │   ├── prompt.py           # Prompt templates
@@ -155,34 +161,45 @@ KG-RAG-ISRO/
 │   ├── baselines/
 │   │   ├── bm25_llm.py         # BM25 + Mistral baseline
 │   │   ├── vanilla_rag.py      # FAISS-only RAG baseline
-│   │   └── graphrag.py         # GraphRAG baseline
+│   │   ├── graphrag.py         # GraphRAG baseline
+│   │   └── run_baselines.py    # Batch baseline runner
 │   │
 │   └── evaluation/
-│       ├── evaluate.py         # RAGAS scoring pipeline
-│       └── ablation.py         # Ablation study scripts
+│       ├── evaluate.py         # ROUGE-L / coverage / exact-match scorer
+│       ├── ablation.py         # Ablation study scripts
+│       └── plot_results.py     # Result visualisation (matplotlib)
 │
-├── frontend/
-│   ├── public/
+├── frontend/                   # ⚠ Placeholder — React UI not yet implemented
 │   ├── src/
 │   │   ├── components/
-│   │   │   ├── ChatBox.jsx     # Main chat interface
-│   │   │   ├── QueryInput.jsx  # Question input component
-│   │   │   └── Answer.jsx      # Answer display component
-│   │   ├── App.jsx
+│   │   │   ├── ChatBox.jsx     # Placeholder
+│   │   │   ├── QueryInput.jsx  # Placeholder
+│   │   │   └── Answer.jsx      # Placeholder
+│   │   ├── App.jsx             # Placeholder
 │   │   └── index.jsx
 │   └── package.json
 │
-├── notebooks/
-│   ├── kg_analysis.ipynb       # KG statistics and visualization
-│   ├── retrieval_analysis.ipynb# Retrieval quality analysis
-│   └── results_analysis.ipynb  # Experiment results analysis
+├── notebooks/                  # ⚠ Placeholder — content not yet written
+│   ├── kg_analysis.ipynb
+│   ├── retrieval_analysis.ipynb
+│   └── results_analysis.ipynb
 │
 ├── paper/
 │   ├── main.tex                # IEEE paper LaTeX source
-│   ├── references.bib          # Bibliography
+│   ├── references.bib          # Bibliography (WIP)
 │   └── figures/
-│       └── system_architecture.png
+│       ├── results_comparison.png
+│       ├── ablation_results.png
+│       └── idk_per_tier.png
 │
+├── tests/
+│   ├── test_graph_directory.py
+│   ├── test_indexer.py
+│   ├── test_kg_builder.py
+│   └── test_preprocessing.py
+│
+├── app.py                      # Minimal Flask/CLI app wrapper
+├── app_v2.py                   # Extended app with streaming support
 ├── .env.example
 ├── .gitignore
 ├── requirements.txt
@@ -237,12 +254,15 @@ cp .env.example .env
 # Without a key, the scraper uses its local HTTP fallback.
 ```
 
-### 6. Install frontend dependencies (when the UI is implemented)
+### 6. Install frontend dependencies (once the React UI is implemented)
 
 ```bash
 cd frontend
 npm install
+npm run dev
 ```
+
+> **Note:** The frontend is not yet implemented. The `npm start` script is a placeholder.
 
 ---
 
@@ -296,11 +316,14 @@ python src/retriever/query.py --question "What is the primary payload of Chandra
 The query command expects the generated KG and FAISS index and a running local Ollama
 model. It prints the generated answer to the terminal.
 
-### Step 6 — Run tests
+### Step 6 — Run all baselines
 
 ```bash
-pytest -q
+python src/baselines/run_baselines.py
 ```
+
+Runs BM25 + LLM, Vanilla RAG, and GraphRAG baselines and writes results to
+`data/results/baseline_results.json`.
 
 ### Step 7 — Evaluate saved results
 
@@ -308,20 +331,36 @@ pytest -q
 python src/evaluation/evaluate.py
 ```
 
-The evaluator reads `data/results/baseline_results.json` and the benchmark, then writes
-scores to `data/results/ragas_scores.json`. It currently reports ROUGE-L, answer
-coverage, exact match, and abstention rate.
+Reads `data/results/baseline_results.json` and the benchmark, then writes scores to
+`data/results/ragas_scores.json`. Reports ROUGE-L, answer coverage, exact match, and
+abstention rate.
 
-### Frontend status
+### Step 8 — Run ablation study
 
-The backend and research pipeline are complete. The React interface in `frontend/` is the
-remaining implementation task; its current `npm start` command is a placeholder.
+```bash
+python src/evaluation/ablation.py
+```
+
+### Step 9 — Plot results
+
+```bash
+python src/evaluation/plot_results.py
+```
+
+Generates comparison charts to `paper/figures/`.
+
+### Step 10 — Run tests
+
+```bash
+pytest -q
+```
 
 ---
 
 ## ISRO-QA Benchmark
 
-The ISRO-QA benchmark is intended to contain 200 manually curated question-answer pairs:
+ISRO-QA is a curated benchmark of 200 domain-specific question-answer pairs across three
+difficulty tiers, stored at `data/benchmark/isro_qa.json`:
 
 | Tier | Type | Count |
 |---|---|---|
@@ -329,8 +368,6 @@ The ISRO-QA benchmark is intended to contain 200 manually curated question-answe
 | 2 | Multi-hop relational | 60 |
 | 3 | Timeline reasoning | 40 |
 | **Total** | | **200** |
-
-The benchmark JSON is located at `data/benchmark/isro_qa.json`.
 
 ---
 
@@ -346,7 +383,31 @@ The benchmark JSON is located at `data/benchmark/isro_qa.json`.
 | LLM | Mistral-7B-Instruct Q4\_K\_M |
 | LLM serving | Ollama |
 | Evaluation | RAGAS |
-| Frontend | React |
+| Frontend | React (Vite) — pending |
+
+---
+
+## Implementation Status
+
+| Component | Status | Notes |
+|---|---|---|
+| Web scraper | ✅ Complete | Firecrawl API + HTTP fallback |
+| Preprocessing | ✅ Complete | Cleaning, deduplication, chunking |
+| NER + entity ruler | ✅ Complete | spaCy + ISRO-domain patterns |
+| KG construction | ✅ Complete | NetworkX, dep. parsing, triple extraction |
+| FAISS indexer | ✅ Complete | MiniLM-L6-v2 + Flat L2 index |
+| KG retriever | ✅ Complete | 1-hop neighbourhood expansion |
+| Hybrid retriever | ✅ Complete | KG + FAISS context merging |
+| Generator | ✅ Complete | Ollama REST + prompt templates |
+| Baselines | ✅ Complete | BM25, Vanilla RAG, GraphRAG |
+| Evaluation | ✅ Complete | ROUGE-L, coverage, exact match, abstention |
+| Ablation study | ✅ Complete | Results in `data/results/ablation_results.json` |
+| Unit tests | ✅ Complete | 4 test modules, `pytest -q` |
+| ISRO-QA benchmark | ✅ Complete | 200 QA pairs, `data/benchmark/isro_qa.json` |
+| Result figures | ✅ Complete | 3 charts in `paper/figures/` |
+| Paper (LaTeX) | 🔄 In progress | `paper/main.tex` drafted; bibliography WIP |
+| React frontend | ❌ Pending | All components are placeholder stubs |
+| Analysis notebooks | ❌ Pending | `.ipynb` files are empty stubs |
 
 ---
 
